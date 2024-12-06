@@ -1,8 +1,9 @@
-from datetime import datetime
-import pytz
-from decimal import Decimal
-import boto3
 import os
+from datetime import datetime, timedelta
+from decimal import Decimal
+
+import boto3
+import pytz
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -24,7 +25,78 @@ dynamodb = boto3.resource(
 # Access a specific table
 table = dynamodb.Table("tbl_sensor_data_timestamp")
 
-from datetime import timedelta
+# Specify the threshold table name
+threshold_table = dynamodb.Table("tbl_threshold")
+
+
+# Function to get threshold data from DynamoDB
+def fetch_thresholds_from_db():  # Renamed the function that interacts with DynamoDB
+    try:
+        thresholds = {}
+        for sensor_type in ["temperature", "humidity"]:
+            try:
+                response = threshold_table.get_item(
+                    Key={
+                        "thresholds": str(sensor_type),
+                        "sensor_type": str(sensor_type),
+                    }
+                )
+                if "Item" in response:
+                    thresholds[sensor_type] = {
+                        "min": float(
+                            response["Item"].get("min_value", 0)
+                        ),  # Convert to float
+                        "max": float(
+                            response["Item"].get("max_value", 0)
+                        ),  # Convert to float
+                    }
+                else:
+                    print(f"No threshold values found for {sensor_type}")
+                    thresholds[sensor_type] = {"min": None, "max": None}
+            except Exception as e:
+                print(f"Error fetching {sensor_type} threshold: {str(e)}")
+                thresholds[sensor_type] = {"min": None, "max": None}
+
+        print("Thresholds fetched:", thresholds)
+        return thresholds
+
+    except Exception as e:
+        print(f"Critical error in get_thresholds: {str(e)}")
+        return {"error": str(e)}
+
+
+# Function to set threshold data in DynamoDB
+from decimal import Decimal
+
+
+def set_threshold(sensor_type, min_value, max_value):
+    try:
+        response = threshold_table.put_item(
+            Item={
+                "thresholds": str(sensor_type),  # Primary key
+                "sensor_type": str(sensor_type),  # Sort key
+                "min_value": Decimal(str(min_value)),  # Convert to Decimal
+                "max_value": Decimal(str(max_value)),  # Convert to Decimal
+                "updated_at": str(datetime.now()),
+            }
+        )
+        print(
+            f"Successfully updated {sensor_type} thresholds: min={min_value}, max={max_value}"
+        )
+        return {
+            "status": "success",
+            "message": f"{sensor_type} thresholds updated successfully",
+            "data": {
+                "sensor_type": sensor_type,
+                "min_value": str(min_value),  # Convert to string for JSON response
+                "max_value": str(max_value),  # Convert to string for JSON response
+            },
+        }
+    except Exception as e:
+        error_msg = f"Error setting {sensor_type} thresholds: {str(e)}"
+        print(error_msg)
+        return {"status": "error", "message": str(e)}
+
 
 def fetch_specific_hour_avg_data(hour):
     sensor_data = fetch_sensor_data()
@@ -70,7 +142,13 @@ def fetch_hourly_avg_data():
     for hour, values in hourly_data.items():
         avg_temp = sum(values["temperature"]) / len(values["temperature"])
         avg_humidity = sum(values["humidity"]) / len(values["humidity"])
-        hourly_avg.append({"hour": hour.strftime("%Y-%m-%d %H:%M:%S"), "temperature": avg_temp, "humidity": avg_humidity})
+        hourly_avg.append(
+            {
+                "hour": hour.strftime("%Y-%m-%d %H:%M:%S"),
+                "temperature": avg_temp,
+                "humidity": avg_humidity,
+            }
+        )
 
     # Sort by hour
     hourly_avg.sort(key=lambda x: x["hour"])
@@ -86,7 +164,8 @@ def fetch_daily_avg_data():
 
     today = datetime.now(pytz.timezone("Europe/Helsinki")).date()
     daily_data = [
-        data for data in sensor_data
+        data
+        for data in sensor_data
         if datetime.strptime(data["timestamp"], "%Y-%m-%d %H:%M:%S").date() == today
     ]
 
@@ -100,7 +179,6 @@ def fetch_daily_avg_data():
         return None
 
 
-
 # Fetch weekly average temperature and humidity
 def fetch_weekly_avg_data():
     sensor_data = fetch_sensor_data()
@@ -108,12 +186,16 @@ def fetch_weekly_avg_data():
         return None
 
     # Get the date one week ago in Helsinki timezone
-    one_week_ago = datetime.now(pytz.timezone("Europe/Helsinki")).date() - timedelta(days=7)
+    one_week_ago = datetime.now(pytz.timezone("Europe/Helsinki")).date() - timedelta(
+        days=7
+    )
 
     # Filter data for the past week
     weekly_data = [
-        data for data in sensor_data
-        if datetime.strptime(data["timestamp"], "%Y-%m-%d %H:%M:%S").date() >= one_week_ago
+        data
+        for data in sensor_data
+        if datetime.strptime(data["timestamp"], "%Y-%m-%d %H:%M:%S").date()
+        >= one_week_ago
     ]
 
     if weekly_data:
@@ -125,7 +207,6 @@ def fetch_weekly_avg_data():
         return None
 
 
-
 # fetch_data.py
 def fetch_latest_sensor_data():
     # Fetch all sensor data from the database (as a list of dictionaries)
@@ -134,10 +215,11 @@ def fetch_latest_sensor_data():
     # If there's data, return the latest one
     if sensor_data:
         # Sort the data by timestamp in descending order and get the first item
-        latest_data = sorted(sensor_data, key=lambda x: x['timestamp'], reverse=True)[0]
+        latest_data = sorted(sensor_data, key=lambda x: x["timestamp"], reverse=True)[0]
         return latest_data
     else:
         return None
+
 
 # Function to fetch temperatures, humidities, and timestamps
 def fetch_sensor_data():
@@ -164,7 +246,9 @@ def fetch_sensor_data():
                     # Create datetime object from timestamp (assumed to be in UTC)
                     timestamp_dt = datetime.fromtimestamp(timestamp_sec, tz=pytz.UTC)
                     # Convert UTC to Helsinki time zone
-                    timestamp_dt = timestamp_dt.astimezone(pytz.timezone("Europe/Helsinki"))
+                    timestamp_dt = timestamp_dt.astimezone(
+                        pytz.timezone("Europe/Helsinki")
+                    )
 
                     # Format datetime to string (e.g., "2024-12-05 19:45:36")
                     timestamp_str = timestamp_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -179,7 +263,7 @@ def fetch_sensor_data():
                 )
 
         # Sort the data by timestamp in descending order
-        sensor_data.sort(key=lambda x: x['timestamp'], reverse=True)
+        sensor_data.sort(key=lambda x: x["timestamp"], reverse=True)
 
         return sensor_data
     else:
@@ -192,4 +276,6 @@ sensor_data = fetch_sensor_data()
 
 # Print each entry on a new line
 for data in sensor_data:
-    print(f"Temperature: {data['temperature']} °C, Humidity: {data['humidity']} %, Timestamp: {data['timestamp']}")
+    print(
+        f"Temperature: {data['temperature']} °C, Humidity: {data['humidity']} %, Timestamp: {data['timestamp']}"
+    )

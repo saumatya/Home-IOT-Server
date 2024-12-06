@@ -1,16 +1,23 @@
 # main_api.py
-from flask import Flask, jsonify,request
+# import threading
+from threading import Thread
+from time import sleep
+
+from flask import Flask, jsonify, request
+from flask_socketio import SocketIO, emit
 
 from fetch import (
     fetch_daily_avg_data,
     fetch_hourly_avg_data,
     fetch_latest_sensor_data,
     fetch_specific_hour_avg_data,
+    fetch_thresholds_from_db,
     fetch_weekly_avg_data,
-
+    set_threshold,
 )
 
 app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")  # Add cors_allowed_origins if needed
 
 
 # Endpoint to get the latest temperature
@@ -93,14 +100,6 @@ def weekly_averages():
         return jsonify({"error": "No weekly data available"}), 404
 
 
-# In-memory storage for thresholds (can be replaced with a database or other persistent storage)
-thresholds = {
-    "temperature": {"min": None, "max": None},
-    "humidity": {"min": None, "max": None},
-}
-
-
-# POST endpoint to set thresholds for temperature and humidity
 @app.route("/set-thresholds", methods=["POST"])
 def set_thresholds():
     try:
@@ -108,33 +107,162 @@ def set_thresholds():
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        # Validate and set temperature thresholds
+        # Set temperature thresholds
         if "temperature" in data:
             if "min" in data["temperature"]:
-                thresholds["temperature"]["min"] = data["temperature"]["min"]
-            if "max" in data["temperature"]:
-                thresholds["temperature"]["max"] = data["temperature"]["max"]
+                min_temp = data["temperature"]["min"]
+                max_temp = data["temperature"]["max"]
+                response = set_threshold("temperature", min_temp, max_temp)
 
-        # Validate and set humidity thresholds
+        # Set humidity thresholds
         if "humidity" in data:
             if "min" in data["humidity"]:
-                thresholds["humidity"]["min"] = data["humidity"]["min"]
-            if "max" in data["humidity"]:
-                thresholds["humidity"]["max"] = data["humidity"]["max"]
+                min_humidity = data["humidity"]["min"]
+                max_humidity = data["humidity"]["max"]
+                response = set_threshold("humidity", min_humidity, max_humidity)
 
         return jsonify(
-            {"message": "Thresholds updated successfully", "thresholds": thresholds}
+            {"message": "Thresholds updated successfully", "response": response}
         )
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-# GET endpoint to retrieve current thresholds
 @app.route("/get-thresholds", methods=["GET"])
-def get_thresholds():
-    return jsonify(thresholds)
+def get_thresholds():  # This is the route handler
+    try:
+        thresholds = fetch_thresholds_from_db()
+        if "error" in thresholds:
+            return jsonify({"error": thresholds["error"]}), 500
+
+        return jsonify({"status": "success", "data": thresholds})
+    except Exception as e:
+        print(f"Error in get_thresholds route: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def monitor_sensor_data():
+    while True:
+        try:
+            # Fetch the latest sensor data
+            latest_data = fetch_latest_sensor_data()
+
+            if not latest_data:
+                print("Warning: No sensor data received")
+                sleep(5)
+                continue
+
+            try:
+                temperature = float(latest_data["temperature"])
+                humidity = float(latest_data["humidity"])
+            except (KeyError, ValueError) as e:
+                print(f"Error parsing sensor data: {e}")
+                print(f"Received data: {latest_data}")
+                sleep(5)
+                continue
+
+            # Fetch the current threshold values from DynamoDB
+            thresholds = fetch_thresholds_from_db()
+
+            if thresholds is None:
+                print("Error: get_thresholds() returned None")
+                sleep(5)
+                continue
+
+            if not isinstance(thresholds, dict):
+                print(f"Error: thresholds is not a dictionary. Got {type(thresholds)}")
+                sleep(5)
+                continue
+
+            if "temperature" not in thresholds or "humidity" not in thresholds:
+                print("Error: Missing required threshold keys")
+                print(f"Available keys: {thresholds.keys()}")
+                sleep(5)
+                continue
+
+            # Check temperature thresholds
+            temp_threshold = thresholds["temperature"]
+            if (
+                temp_threshold["min"] is not None
+                and temperature < temp_threshold["min"]
+            ):
+                try:
+                    socketio.emit(
+                        "alert",
+                        {
+                            "type": "temperature",
+                            "value": temperature,
+                            "message": f"Temperature too low! Current: {temperature}°C, Minimum: {temp_threshold['min']}°C",
+                        },
+                    )
+                except Exception as e:
+                    print(f"Error sending temperature low alert: {e}")
+
+            if (
+                temp_threshold["max"] is not None
+                and temperature > temp_threshold["max"]
+            ):
+                try:
+                    socketio.emit(
+                        "alert",
+                        {
+                            "type": "temperature",
+                            "value": temperature,
+                            "message": f"Temperature too high! Current: {temperature}°C, Maximum: {temp_threshold['max']}°C",
+                        },
+                    )
+                except Exception as e:
+                    print(f"Error sending temperature high alert: {e}")
+
+            # Check humidity thresholds
+            humid_threshold = thresholds["humidity"]
+            if humid_threshold["min"] is not None and humidity < humid_threshold["min"]:
+                try:
+                    socketio.emit(
+                        "alert",
+                        {
+                            "type": "humidity",
+                            "value": humidity,
+                            "message": f"Humidity too low! Current: {humidity}%, Minimum: {humid_threshold['min']}%",
+                        },
+                    )
+                except Exception as e:
+                    print(f"Error sending humidity low alert: {e}")
+
+            if humid_threshold["max"] is not None and humidity > humid_threshold["max"]:
+                try:
+                    socketio.emit(
+                        "alert",
+                        {
+                            "type": "humidity",
+                            "value": humidity,
+                            "message": f"Humidity too high! Current: {humidity}%, Maximum: {humid_threshold['max']}%",
+                        },
+                    )
+                except Exception as e:
+                    print(f"Error sending humidity high alert: {e}")
+
+            # Log successful monitoring iteration
+            print(f"Monitored - Temp: {temperature}°C, Humidity: {humidity}%")
+
+        except Exception as e:
+            print(f"Unexpected error in monitor_sensor_data: {e}")
+
+        sleep(5)  # Monitor every 5 seconds
+
+
+@socketio.on("connect")
+def handle_connect():
+    print("Client connected.")
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    print("Client disconnected.")
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # app.run(host="0.0.0.0", port=5000, debug=False)
+    socketio.start_background_task(monitor_sensor_data)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
