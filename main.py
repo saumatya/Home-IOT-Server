@@ -17,7 +17,8 @@ from fetch import (
 )
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")  # Add cors_allowed_origins if needed
+# socketio = SocketIO(app, cors_allowed_origins="http://172.20.10.13:5000")  # cors enable for client
+socketio = SocketIO(app, cors_allowed_origins="*")  # cors enable for all
 
 
 # Endpoint to get the latest temperature
@@ -129,6 +130,47 @@ def set_thresholds():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/update-thresholds", methods=["PUT"])
+def update_thresholds():
+    try:
+        data = request.json  # Get JSON payload
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        updated_values = {}
+
+        # Update temperature thresholds
+        if "temperature" in data:
+            if "min" in data["temperature"]:
+                min_temp = data["temperature"]["min"]
+                max_temp = data["temperature"]["max"]
+                updated_values["temperature"] = set_threshold(
+                    "temperature", min_temp, max_temp
+                )
+
+        # Update humidity thresholds
+        if "humidity" in data:
+            if "min" in data["humidity"]:
+                min_humidity = data["humidity"]["min"]
+                max_humidity = data["humidity"]["max"]
+                updated_values["humidity"] = set_threshold(
+                    "humidity", min_humidity, max_humidity
+                )
+
+        if not updated_values:
+            return jsonify({"error": "No valid threshold data to update"}), 400
+
+        return jsonify(
+            {
+                "message": "Thresholds updated successfully",
+                "updated_values": updated_values,
+            }
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/get-thresholds", methods=["GET"])
 def get_thresholds():  # This is the route handler
     try:
@@ -140,6 +182,70 @@ def get_thresholds():  # This is the route handler
     except Exception as e:
         print(f"Error in get_thresholds route: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# def monitor_sensor_data_poll():
+#     while True:
+#         try:
+#             latest_data = fetch_latest_sensor_data()
+#             if latest_data:
+#                 temperature = round(float(latest_data["temperature"]), 1)
+#                 humidity = round(float(latest_data["humidity"]), 1)
+#                 socketio.emit(
+#                     "sensor_update", {"temperature": temperature, "humidity": humidity}
+#                 )
+#         except Exception as e:
+#             print(f"Error in monitor_sensor_data: {str(e)}")
+#         sleep(5)  # Adjust the interval based on your requirements
+
+from datetime import datetime
+
+
+def monitor_sensor_data_poll():
+    previous_timestamp = None
+    while True:
+        try:
+            latest_data = fetch_latest_sensor_data()
+            if latest_data:
+                temperature = round(float(latest_data["temperature"]), 1)
+                humidity = round(float(latest_data["humidity"]), 1)
+                # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                timestamp = latest_data["timestamp"]
+
+                # Ensure that we don't send the same timestamp data
+                if timestamp != previous_timestamp:
+                    data_to_send = {
+                        "temperature": temperature,
+                        "humidity": humidity,
+                        "timestamp": timestamp,
+                    }
+
+                    # Print the data along with the timestamp
+                    print(f"Sending data at {timestamp}: {data_to_send}")
+
+                    # Emit the data
+                    socketio.emit("sensor_update", data_to_send)
+
+                    # Update the previous timestamp
+                    previous_timestamp = timestamp
+                else:
+                    print(f"Skipping sending duplicate data at {timestamp}")
+
+                # data_to_send = {
+                #     "temperature": temperature,
+                #     "humidity": humidity,
+                #     "timestamp": timestamp,
+                # }
+
+                # # Print the data along with the timestamp
+                # print(f"Sending data at {timestamp}: {data_to_send}")
+
+                # # Emit the data
+                # socketio.emit("sensor_update", data_to_send)
+        except Exception as e:
+            print(f"Error in monitor_sensor_data: {str(e)}")
+
+        sleep(5)  # Adjust the interval based on your requirements
 
 
 def monitor_sensor_data():
@@ -156,6 +262,7 @@ def monitor_sensor_data():
             try:
                 temperature = float(latest_data["temperature"])
                 humidity = float(latest_data["humidity"])
+
             except (KeyError, ValueError) as e:
                 print(f"Error parsing sensor data: {e}")
                 print(f"Received data: {latest_data}")
@@ -264,5 +371,6 @@ def handle_disconnect():
 
 if __name__ == "__main__":
     # app.run(host="0.0.0.0", port=5000, debug=False)
+    socketio.start_background_task(monitor_sensor_data_poll)
     socketio.start_background_task(monitor_sensor_data)
     socketio.run(app, host="0.0.0.0", port=5000, debug=False)

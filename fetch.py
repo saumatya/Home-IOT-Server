@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# Access the variables
+# Access the AWS Keys
 aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
 aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
 region = os.getenv("AWS_DEFAULT_REGION")
@@ -25,7 +25,7 @@ dynamodb = boto3.resource(
 # Access a specific table
 table = dynamodb.Table("tbl_sensor_data_timestamp")
 
-# Specify the threshold table name
+# Access the threshold table name
 threshold_table = dynamodb.Table("tbl_threshold")
 
 
@@ -225,7 +225,6 @@ def fetch_latest_sensor_data():
 def fetch_sensor_data():
     # Scan the table to retrieve all items
     response = table.scan()
-
     # Check if 'Items' exist in the response
     if "Items" in response:
         sensor_data = []
